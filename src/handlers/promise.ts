@@ -19,24 +19,33 @@ export class PromiseHandler {
 		if (promise.timeout) clearTimeout(promise.timeout);
 		this.nonces.delete(message._nonce);
 
-		if (message._type !== MessageTypes.ClientEvalResponseError) promise.resolve(message.data);
-		else {
-			const data = message.data as BaseMessage<'error'>['data'];
-			const error = new Error(data.message + '\n' + data.stack);
+		const errorTypes = [
+			MessageTypes.ClientEvalResponseError,
+			MessageTypes.ClientManagerEvalResponseError,
+			MessageTypes.ClientBroadcastResponseError,
+		];
 
-			error.cause = data.script;
-			error.stack = data.stack;
-			error.name = data.name;
-			promise.reject(error);
-
-			console.error('An error occurred while evaluating the script:', data);
+		if (!errorTypes.includes(message._type)) {
+			promise.resolve(message.data);
+			return;
 		}
+
+		const data = message.data as Partial<BaseMessage<'error'>['data']>;
+		const error = new Error([data.message, data.stack].filter(Boolean).join('\n') || 'Unknown IPC error');
+
+		if (data.script) error.cause = data.script;
+		if (data.stack) error.stack = data.stack;
+		if (data.name) error.name = data.name;
+
+		promise.reject(error);
+
+		console.error('An error occurred while resolving an IPC promise:', data);
 	}
 
 	/** Creates a promise and stores it in the map. */
 	public async create<T>(nonce: string, timeout?: number): Promise<T> {
 		return await new Promise<T>((resolve, reject) => {
-			if (!timeout) this.nonces.set(nonce, { resolve, reject });
+			if (timeout === undefined || timeout < 0) this.nonces.set(nonce, { resolve, reject });
 			else this.nonces.set(nonce, {
 				resolve, reject,
 				timeout: setTimeout(() => {

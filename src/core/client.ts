@@ -9,6 +9,8 @@ export type ClientEventsModifiable = Omit<ClientEvents, 'ready' | 'clientReady'>
 	clientReady: [client: ShardingClient];
 };
 
+export type ShardingClientOptions = ClientOptions;
+
 /** Modified DiscordClient with bunch of new methods. */
 export class ShardingClient<
 	Ready extends boolean = boolean,
@@ -18,7 +20,7 @@ export class ShardingClient<
 	cluster: ClusterClient<this, InternalManager>;
 
 	/** Creates an instance of ShardingClient. */
-	constructor (options: ClientOptions) {
+	constructor (options: ShardingClientOptions) {
 		super({
 			...options,
 			shards: getInfo().ShardList,
@@ -30,10 +32,16 @@ export class ShardingClient<
 	}
 
 	private async shardsReady() {
-		const { major, minor, patch } = await getDiscordVersion('discord.js');
-		const useClientReady = major > 14 || (major === 14 && (minor > 22 || (minor === 22 && patch >= 0)));
+		let readyEvent: 'ready' | 'clientReady' = 'ready';
 
-		this.on(useClientReady ? 'clientReady' : 'ready', () => this.cluster.triggerReady());
+		try {
+			const { major, minor } = await getDiscordVersion('discord.js');
+			readyEvent = major > 14 || (major === 14 && minor >= 22) ? 'clientReady' : 'ready';
+		} catch {
+			readyEvent = 'ready';
+		}
+
+		this.once(readyEvent, () => this.cluster.triggerReady());
 	}
 }
 

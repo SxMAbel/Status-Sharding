@@ -72,6 +72,27 @@ export class ClusterClient<
 		return getInfo();
 	}
 
+	/** Checks if the internal client is ready enough to acknowledge heartbeat pings. */
+	public async isReadyForHeartbeatAck(): Promise<boolean> {
+		switch (this.packageType) {
+			case 'discord.js': {
+				const discordClient = this.client as unknown as { isReady?: () => boolean; readyAt?: Date | null; };
+				if (typeof discordClient.isReady === 'function') return discordClient.isReady();
+				return Boolean(discordClient.readyAt);
+			}
+			case '@discordjs/core': {
+				const coreClient = this.client as unknown as RefShardingCoreClient;
+				const statuses = await coreClient.gateway.fetchStatus();
+
+				if (!statuses?.size) return false;
+				return Array.from(statuses.values()).every((status) => Number(status) === 3);
+			}
+			default: {
+				return this.ready;
+			}
+		}
+	}
+
 	/** Sends a message to the Cluster as child. (goes to Cluster on _handleMessage). */
 	public send<T extends Serializable>(message: SerializableInput<T>): Promise<void> {
 		if (!this.process) return Promise.reject(new Error('CLUSTERING_NO_PROCESS_TO_SEND_TO | No process to send the message to (#1).'));
@@ -251,16 +272,20 @@ export class ClusterClient<
 	}
 
 	/** Handles a message from the ClusterManager. */
-	private _handleMessage(message: BaseMessage<'normal'> | BrokerMessage): void {
-		if (!message || '_data' in message) return this.broker.handleMessage(message);
+	private _handleMessage(message: BaseMessage<'normal'> | BrokerMessage | unknown): void {
+		if (!message || typeof message !== 'object') return;
+		if ('_data' in message) return this.broker.handleMessage(message as BrokerMessage);
+		if (!('_type' in message)) return;
+
+		const ipcMessage = message as BaseMessage<'normal'>;
 
 		// Debug.
 		this.emit('debug', `[IPC] [Child ${this.id}] Received message from cluster.`);
-		this.messageHandler.handleMessage(message);
+		this.messageHandler.handleMessage(ipcMessage);
 
 		// Emitted upon receiving a message from the child process/worker.
-		if ([MessageTypes.CustomMessage, MessageTypes.CustomRequest].includes(message._type)) {
-			this.emit('message', new ProcessMessage(this, message));
+		if ([MessageTypes.CustomMessage, MessageTypes.CustomRequest].includes(ipcMessage._type)) {
+			this.emit('message', new ProcessMessage(this, ipcMessage));
 		}
 	}
 

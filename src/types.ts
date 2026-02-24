@@ -91,6 +91,8 @@ export interface ClusterManagerCreateOptions<T extends ClusteringMode> {
 	execArgv?: string[];
 	/** Whether clusters should automatically respawn upon exiting. */
 	respawn?: boolean;
+	/** Whether a cluster should acknowledge heartbeat while the internal client is not ready. Defaults to `true`. */
+	respondToHeartbeatWhenNotReady?: boolean;
 	/** Heartbeat options. */
 	heartbeat?: ClusterHeartbeatOptions;
 	/** Control the Spawn Queue. */
@@ -115,6 +117,8 @@ export interface ClusterManagerOptions<T extends ClusteringMode> extends Cluster
 	totalClusters: number;
 	/** Number of shards per cluster. */
 	shardsPerClusters: number;
+	/** Whether a cluster should acknowledge heartbeat while the internal client is not ready. */
+	respondToHeartbeatWhenNotReady: boolean;
 	/** An Array of Internal Shards Ids, which should get spawned. */
 	shardList: number[];
 	/** An Array of Ids to assign to the spawned Clusters, when the default id scheme is not wanted. */
@@ -149,6 +153,8 @@ export interface ClusterClientData {
 	ClusterManagerMode: ClusteringMode;
 	/** Mode of the queue. */
 	ClusterQueueMode?: 'auto' | 'manual';
+	/** Whether the client should acknowledge heartbeat while not ready. */
+	RespondToHeartbeatWhenNotReady: boolean;
 	/** First shard id of the cluster. */
 	FirstShardId: number;
 	/** Last shard id of the cluster. */

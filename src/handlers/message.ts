@@ -31,6 +31,7 @@ export class ClusterHandler {
 				this.cluster.lastHeartbeatReceived = Date.now();
 
 				this.cluster.emit('ready', this.cluster);
+				this.cluster.manager.emit('clusterReady', this.cluster);
 				this.cluster.manager._debug(`[Cluster ${this.cluster.id}] Cluster is ready.`);
 
 				const allReady = this.cluster.manager.clusters.every((cluster) => cluster.ready);
@@ -136,51 +137,35 @@ export class ClusterClientHandler<InternalClient extends ClientRefType = ClientR
 		switch (message._type) {
 			case MessageTypes.ClientEvalRequest: {
 				const { script } = message.data as EvalMessage;
-				try {
-					if (!script) return this.clusterClient._respond({
+				if (!script) {
+					this.clusterClient._respond({
 						_type: MessageTypes.ClientEvalResponseError,
 						_nonce: message._nonce,
 						data: ShardingUtils.makePlainError(new Error('No script provided.')),
 					} as BaseMessage<'error'>);
+					break;
+				}
 
-					try {
-						const result = await this.clusterClient.evalOnClient(script);
-						this.clusterClient._respond({
-							_type: MessageTypes.ClientEvalResponse,
-							_nonce: message._nonce,
-							data: ShardingUtils.isSerializable(result) ? result : {
-								...ShardingUtils.makePlainError(new Error('Evaluated script returned an unserializable value.')),
-								script: script?.replace(/(\n|\r|\t)/g, '').replace(/( )+/g, ' ').replace(/(\/\/.*)/g, ''),
-							},
-						} as BaseMessage<'evalResult'>);
-					} catch (err) {
-						if (err instanceof Error) {
-							this.clusterClient._respond({
-								_type: MessageTypes.ClientEvalResponseError,
-								_nonce: message._nonce,
-								data: {
-									...ShardingUtils.makePlainError(err),
-									script: script?.replace(/(\n|\r|\t)/g, '').replace(/( )+/g, ' ').replace(/(\/\/.*)/g, ''),
-								},
-							} as BaseMessage<'error'>);
-						} else {
-							this.clusterClient._respond({
-								_type: MessageTypes.ClientEvalResponseError,
-								_nonce: message._nonce,
-								data: {
-									...ShardingUtils.makePlainError(new Error('An error occurred while evaluating the script.')),
-									script: script?.replace(/(\n|\r|\t)/g, '').replace(/( )+/g, ' ').replace(/(\/\/.*)/g, ''),
-								},
-							} as BaseMessage<'error'>);
-						}
+				const normalizedScript = script.replace(/(\n|\r|\t)/g, '').replace(/( )+/g, ' ').replace(/(\/\/.*)/g, '');
 
-						throw err;
-					}
+				try {
+					const result = await this.clusterClient.evalOnClient(script);
+					this.clusterClient._respond({
+						_type: MessageTypes.ClientEvalResponse,
+						_nonce: message._nonce,
+						data: ShardingUtils.isSerializable(result) ? result : {
+							...ShardingUtils.makePlainError(new Error('Evaluated script returned an unserializable value.')),
+							script: normalizedScript,
+						},
+					} as BaseMessage<'evalResult'>);
 				} catch (err) {
 					this.clusterClient._respond({
 						_type: MessageTypes.ClientEvalResponseError,
 						_nonce: message._nonce,
-						data: ShardingUtils.makePlainError(err as Error),
+						data: {
+							...ShardingUtils.makePlainError(err instanceof Error ? err : new Error('An error occurred while evaluating the script.')),
+							script: normalizedScript,
+						},
 					} as BaseMessage<'error'>);
 				}
 
@@ -199,6 +184,19 @@ export class ClusterClientHandler<InternalClient extends ClientRefType = ClientR
 				break;
 			}
 			case MessageTypes.Heartbeat: {
+				if (!this.clusterClient.info.RespondToHeartbeatWhenNotReady) {
+					try {
+						const readyForHeartbeat = await this.clusterClient.isReadyForHeartbeatAck();
+						if (!readyForHeartbeat) {
+							this.clusterClient._debug(`[Heartbeat] Skipping heartbeat ack on cluster ${this.clusterClient.id} because the client is not ready.`);
+							break;
+						}
+					} catch (error) {
+						this.clusterClient._debug(`[Heartbeat] Failed to check readiness for heartbeat ack on cluster ${this.clusterClient.id}: ${(error as Error).message}`);
+						break;
+					}
+				}
+
 				this.clusterClient._respond({ _type: MessageTypes.HeartbeatAck } as BaseMessage<'heartbeat'>);
 				break;
 			}

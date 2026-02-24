@@ -11,11 +11,11 @@ export function getInfo(): ClusterClientData {
 	let data: ClusterClientData;
 
 	if (clusterMode === 'process') {
-		const shardList: number[] = [];
-
-		for (const cl of process.env?.SHARD_LIST?.split(',') || []) {
-			shardList.push(Number(cl));
-		}
+		const shardList = (process.env.SHARD_LIST || '')
+			.replace(/\[|\]/g, '')
+			.split(',')
+			.map((value) => Number(value.trim()))
+			.filter((value) => Number.isInteger(value) && value >= 0);
 
 		data = {
 			ShardList: shardList,
@@ -24,19 +24,25 @@ export function getInfo(): ClusterClientData {
 			ClusterId: Number(process.env.CLUSTER),
 			ClusterManagerMode: clusterMode,
 			ClusterQueueMode: process.env.CLUSTER_QUEUE_MODE as 'auto' | 'manual',
+			RespondToHeartbeatWhenNotReady: process.env.RESPOND_TO_HEARTBEAT_WHEN_NOT_READY === 'true',
 			FirstShardId: shardList[0] ?? 0,
 			LastShardId: shardList[shardList.length - 1] ?? 0,
 		};
 	} else {
+		const shardList = Array.isArray(workerData.SHARD_LIST) ? workerData.SHARD_LIST : [];
+		const respondToHeartbeatWhenNotReady = workerData.RESPOND_TO_HEARTBEAT_WHEN_NOT_READY === true
+			|| workerData.RESPOND_TO_HEARTBEAT_WHEN_NOT_READY === 'true';
+
 		data = {
-			ShardList: workerData.SHARD_LIST,
+			ShardList: shardList,
 			TotalShards: workerData.TOTAL_SHARDS,
 			ClusterCount: workerData.CLUSTER_COUNT,
 			ClusterId: workerData.CLUSTER,
 			ClusterManagerMode: clusterMode,
 			ClusterQueueMode: workerData.CLUSTER_QUEUE_MODE,
-			FirstShardId: workerData.SHARD_LIST[0],
-			LastShardId: workerData.SHARD_LIST[workerData.SHARD_LIST.length - 1],
+			RespondToHeartbeatWhenNotReady: respondToHeartbeatWhenNotReady,
+			FirstShardId: shardList[0] ?? 0,
+			LastShardId: shardList[shardList.length - 1] ?? 0,
 		};
 	}
 

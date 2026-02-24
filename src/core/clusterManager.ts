@@ -52,6 +52,7 @@ export class ClusterManager<
 			totalClusters: options.totalClusters === undefined ? -1 : options.totalClusters,
 			shardsPerClusters: options.shardsPerClusters === undefined ? -1 : options.shardsPerClusters,
 			respawn: options.respawn === undefined ? true : options.respawn,
+			respondToHeartbeatWhenNotReady: options.respondToHeartbeatWhenNotReady ?? true,
 			heartbeat: ShardingUtils.mergeObjects<Required<ClusterHeartbeatOptions>>(options.heartbeat || {}, {
 				enabled: true,
 				timeout: 8000,
@@ -73,6 +74,7 @@ export class ClusterManager<
 		process.env.CLUSTER_MANAGER_MODE = options.mode;
 		process.env.DISCORD_TOKEN = String(options.token) || undefined;
 		process.env.CLUSTER_QUEUE_MODE = options.queueOptions?.mode ?? 'auto';
+		process.env.RESPOND_TO_HEARTBEAT_WHEN_NOT_READY = String(this.options.respondToHeartbeatWhenNotReady);
 
 		this.ready = false;
 		this.clusters = new CustomMap();

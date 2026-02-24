@@ -24,6 +24,8 @@ export class Cluster<
 	public ready: boolean;
 	/** Exited. */
 	public exited: boolean = false;
+	/** Indicates that this cluster is currently in a respawn flow. */
+	public respawning: boolean = false;
 	/** Represents the child process/worker of the cluster. */
 	public thread: null | Worker | Child;
 	/** Represents the last time the cluster received a heartbeat. */
@@ -37,6 +39,7 @@ export class Cluster<
 		TOTAL_SHARDS: number;
 		CLUSTER_COUNT: number;
 		CLUSTER_QUEUE_MODE: 'auto' | 'manual';
+		RESPOND_TO_HEARTBEAT_WHEN_NOT_READY: boolean;
 		CLUSTER_MANAGER_MODE: 'process' | 'worker';
 	};
 
@@ -53,6 +56,7 @@ export class Cluster<
 			TOTAL_SHARDS: this.totalShards,
 			CLUSTER_COUNT: this.manager.options.totalClusters,
 			CLUSTER_QUEUE_MODE: this.manager.options.queueOptions?.mode ?? 'auto',
+			RESPOND_TO_HEARTBEAT_WHEN_NOT_READY: this.manager.options.respondToHeartbeatWhenNotReady,
 			CLUSTER_MANAGER_MODE: this.manager.options.mode,
 		});
 	}
@@ -104,7 +108,6 @@ export class Cluster<
 					};
 
 					const onReady = () => {
-						this.manager.emit('clusterReady', this);
 						cleanup(true);
 						resolve();
 					};
@@ -188,13 +191,18 @@ export class Cluster<
 
 	/** Respawn function that respawns the cluster's child process/worker. */
 	public async respawn(delay: number = this.manager.options.spawnOptions.delay || 5500, timeout: number = this.manager.options.spawnOptions.timeout || -1): Promise<ChildProcess | WorkerThread> {
+		this.respawning = true;
 		this.ready = false;
 		this.exited = false;
 
-		if (this.thread) await this.kill();
-		if (delay > 0) await ShardingUtils.delayFor(delay);
+		try {
+			if (this.thread) await this.kill();
+			if (delay > 0) await ShardingUtils.delayFor(delay);
 
-		return this.spawn(timeout);
+			return await this.spawn(timeout);
+		} finally {
+			this.respawning = false;
+		}
 	}
 
 	/** Send function that sends a message to the cluster's child process/worker. */
@@ -267,24 +275,28 @@ export class Cluster<
 	}
 
 	/** Message handler function that handles messages from the cluster's child process/worker/manager. */
-	private _handleMessage(message: BaseMessage<'normal'> | BrokerMessage): void {
-		if (!message || '_data' in message) return this.manager.broker.handleMessage(message);
-		else if (!this.messageHandler) throw new Error('CLUSTERING_NO_MESSAGE_HANDLER | Cluster ' + this.id + ' does not have a message handler.');
+	private _handleMessage(message: BaseMessage<'normal'> | BrokerMessage | unknown): void {
+		if (!message || typeof message !== 'object') return;
+		if ('_data' in message) return this.manager.broker.handleMessage(message as BrokerMessage);
+		if (!('_type' in message)) return;
+		if (!this.messageHandler) throw new Error('CLUSTERING_NO_MESSAGE_HANDLER | Cluster ' + this.id + ' does not have a message handler.');
+
+		const ipcMessage = message as BaseMessage<'normal'>;
 
 		if (this.manager.options.advanced?.logMessagesInDebug) {
 			this.manager._debug(`[IPC] [Cluster ${this.id}] Received message from child.`);
 		}
 
-		this.messageHandler.handleMessage(message);
+		this.messageHandler.handleMessage(ipcMessage);
 
-		if ([MessageTypes.CustomMessage, MessageTypes.CustomRequest].includes(message._type)) {
-			const ipcMessage = new ProcessMessage(this, message);
-			if (message._type === MessageTypes.CustomRequest) {
-				this.manager.emit('clientRequest', ipcMessage);
+		if ([MessageTypes.CustomMessage, MessageTypes.CustomRequest].includes(ipcMessage._type)) {
+			const processMessage = new ProcessMessage(this, ipcMessage);
+			if (ipcMessage._type === MessageTypes.CustomRequest) {
+				this.manager.emit('clientRequest', processMessage);
 			}
 
-			this.emit('message', ipcMessage);
-			this.manager.emit('message', ipcMessage);
+			this.emit('message', processMessage);
+			this.manager.emit('message', processMessage);
 		}
 	}
 
@@ -295,9 +307,8 @@ export class Cluster<
 
 		this.ready = false;
 		this.exited = true;
+		this.respawning = false;
 		this.thread = null;
-
-		this.manager.heartbeat?.removeCluster(this.id);
 
 		if (!this.manager.heartbeat) {
 			if (this.manager.options.respawn && exitCode !== 0 && exitCode !== null) {
@@ -327,9 +338,8 @@ export class Cluster<
 
 			this.ready = false;
 			this.exited = true;
+			this.respawning = false;
 			this.thread = null;
-
-			this.manager.heartbeat?.removeCluster(this.id);
 
 			if (this.manager.options.respawn) {
 				this.manager._debug(`[Cluster ${this.id}] Scheduling respawn after crash.`);

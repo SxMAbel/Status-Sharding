@@ -16,91 +16,90 @@ export class ReClusterManager {
 		if (this.inProgress) throw new Error('RECLUSTER_IN_PROGRESS | ReClustering is already in progress.');
 		else if (!this.manager.ready) throw new Error('CLUSTER_MANAGER_NOT_READY | All clusters must be ready before re-clustering.');
 
-		if (!options.restartMode) options.restartMode = 'gracefulSwitch';
+		const restartMode = options.restartMode || 'gracefulSwitch';
 
 		this.inProgress = true;
-		this.manager._debug('[ReClustering] Starting ReClustering.');
+		this.manager._debug(`[ReClustering] Starting re-clustering in "${restartMode}" mode.`);
 
-		const listOfShardsForCluster = ShardingUtils.chunkArray(this.manager.options.shardList || [], this.manager.options.shardsPerClusters || this.manager.options.totalShards);
+		try {
+			const targetTotalShards = Math.max(1, options.totalShards ?? this.manager.options.totalShards);
+			let targetTotalClusters = Math.max(1, options.totalClusters ?? this.manager.options.totalClusters);
+			let targetShardsPerClusters = Math.max(1, options.shardsPerClusters ?? Math.ceil(targetTotalShards / targetTotalClusters));
 
-		const newClusters: Map<number, Cluster> = new Map();
-		const oldClusters: Map<number, Cluster> = new Map();
+			if (targetShardsPerClusters > targetTotalShards) targetShardsPerClusters = targetTotalShards;
 
-		for (const cf of this.manager.clusters.values()) oldClusters.set(cf.id, cf);
+			const shardList = Array.from({ length: targetTotalShards }, (_, i) => i);
+			const listOfShardsForCluster = ShardingUtils.chunkArray(shardList, targetShardsPerClusters);
+			targetTotalClusters = listOfShardsForCluster.length;
 
-		for (let i = 0; i < this.manager.options.totalClusters; i++) {
-			const length = listOfShardsForCluster[i]?.length || this.manager.options.totalShards / this.manager.options.totalClusters;
-			const clusterId = this.manager.options.clusterList[i] || i;
+			const existingClusterIds = Array.from(this.manager.clusters.keys()).sort((a, b) => a - b);
+			const clusterList = Array.from({ length: targetTotalClusters }, (_, i) => existingClusterIds[i] ?? i);
 
-			this.manager.clusterQueue.add({
-				args: [this.manager.options.spawnOptions.timeout !== -1 ? this.manager.options.spawnOptions.timeout + this.manager.options.spawnOptions.delay * length : this.manager.options.spawnOptions.timeout],
-				timeout: (this.manager.options.spawnOptions.delay || 8000) * length,
-				run: async (...a: number[]) => {
-					if (!this.manager) throw new Error('Manager is missing on ReClusterManager (#1).');
+			this.manager.options.totalShards = targetTotalShards;
+			this.manager.options.totalClusters = targetTotalClusters;
+			this.manager.options.shardsPerClusters = targetShardsPerClusters;
+			this.manager.options.shardList = shardList;
+			this.manager.options.clusterList = clusterList;
 
-					const cluster = this.manager.createCluster(clusterId, listOfShardsForCluster[i] || [], true);
-					newClusters.set(clusterId, cluster);
+			const newClusters: Map<number, Cluster> = new Map();
+			const oldClusters: Map<number, Cluster> = new Map();
 
-					this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Spawning Cluster.`);
-					const c = await cluster.spawn(...a);
+			for (const cluster of this.manager.clusters.values()) oldClusters.set(cluster.id, cluster);
 
-					if (!this.manager) throw new Error('Manager is missing on ReClusterManager (#2).');
-					this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Cluster Ready.`);
+			for (let i = 0; i < targetTotalClusters; i++) {
+				const clusterId = clusterList[i] ?? i;
+				const shards = listOfShardsForCluster[i] || [];
+				const shardLength = Math.max(1, shards.length);
+				const configuredTimeout = this.manager.options.spawnOptions.timeout;
+				const delayPerShard = this.manager.options.spawnOptions.delay || 8000;
+				const spawnTimeout = configuredTimeout === -1
+					? Math.max(30000, delayPerShard * shardLength)
+					: configuredTimeout + delayPerShard * shardLength;
 
-					if (options.restartMode === 'rolling') {
-						const oldCluster = this.manager.clusters.get(clusterId);
-						if (oldCluster) {
-							oldCluster.kill({ reason: 'reClustering' });
-							oldClusters.delete(clusterId);
-						}
+				const cluster = this.manager.createCluster(clusterId, shards, true);
+				newClusters.set(clusterId, cluster);
 
-						this.manager.clusters.set(clusterId, cluster);
-						this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Switched OldCluster to NewCluster.`);
+				this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Spawning cluster with shards [${shards.join(', ')}].`);
+				await cluster.spawn(spawnTimeout);
+				this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Cluster ready.`);
+
+				if (restartMode === 'rolling') {
+					const oldCluster = oldClusters.get(clusterId);
+					if (oldCluster) {
+						await oldCluster.kill({ reason: 'reClustering' });
+						oldClusters.delete(clusterId);
+						this.manager.clusters.delete(clusterId);
 					}
 
-					return c;
-				},
-			});
-		}
-
-		await this.manager.clusterQueue.start();
-
-		if (oldClusters.size) {
-			this.manager._debug('[ReClustering] Killing old clusters.');
-
-			for (const [id, cluster] of Array.from(oldClusters)) {
-				cluster.kill({ reason: 'ReClustering is in progress.' });
-
-				this.manager._debug(`[ReClustering] [Cluster ${id}] Killed old cluster.`);
-				this.manager.clusters.delete(id);
-			}
-
-			oldClusters.clear();
-		}
-
-		if (options.restartMode === 'rolling') {
-			this.manager._debug('[ReClustering] Starting Rolling Restart.');
-
-			for (let i = 0; i < this.manager.options.totalClusters; i++) {
-				const clusterId = this.manager.options.clusterList[i] || i;
-				const cluster = newClusters.get(clusterId);
-				const oldCluster = this.manager.clusters.get(clusterId);
-
-				if (!cluster) continue;
-				if (oldCluster) {
-					oldCluster.kill({ reason: 'reClustering' });
-					oldClusters.delete(clusterId);
+					this.manager.clusters.set(clusterId, cluster);
+					this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Switched old cluster to new cluster.`);
 				}
 
-				this.manager.clusters.set(clusterId, cluster);
-				this.manager._debug(`[ReClustering] [Cluster ${clusterId}] Switched Old Cluster to New Cluster.`);
+				if (i < targetTotalClusters - 1) await ShardingUtils.delayFor(delayPerShard * shardLength);
 			}
+
+			if (oldClusters.size) {
+				this.manager._debug('[ReClustering] Killing remaining old clusters.');
+
+				for (const [id, cluster] of oldClusters) {
+					await cluster.kill({ reason: 'ReClustering is in progress.' });
+					this.manager.clusters.delete(id);
+					this.manager._debug(`[ReClustering] [Cluster ${id}] Killed old cluster.`);
+				}
+			}
+
+			if (restartMode !== 'rolling') {
+				for (const [id, cluster] of newClusters) {
+					this.manager.clusters.set(id, cluster as unknown as Cluster);
+					this.manager._debug(`[ReClustering] [Cluster ${id}] Switched old cluster to new cluster.`);
+				}
+			}
+
+			this.manager.ready = true;
+			this.manager._debug('[ReClustering] Finished re-clustering.');
+			return true;
+		} finally {
+			this.inProgress = false;
 		}
-
-		newClusters.clear();
-		this.inProgress = false;
-
-		this.manager._debug('[ReClustering] Finished ReClustering.');
-		return true;
 	}
 }

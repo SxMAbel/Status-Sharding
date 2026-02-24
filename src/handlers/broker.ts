@@ -22,14 +22,18 @@ abstract class IPCBrokerAbstract {
 	}
 
 	/** Handles the message received, and executes the callback. (Not meant to be used by the user.) */
-	public handleMessage(message: BrokerMessage): void {
-		if (!message._data || !message.broker) return;
+	public handleMessage(message: BrokerMessage | unknown): void {
+		if (!message || typeof message !== 'object') return;
+		if (!('_data' in message) || !('broker' in message)) return;
 
-		const listeners = this.listeners.get(message.broker);
+		const brokerMessage = message as BrokerMessage;
+		if (typeof brokerMessage.broker !== 'string' || brokerMessage.broker.length === 0) return;
+
+		const listeners = this.listeners.get(brokerMessage.broker);
 		if (!listeners) return;
 
 		for (const listener of listeners) {
-			listener(message._data);
+			listener(brokerMessage._data);
 		}
 	}
 }
